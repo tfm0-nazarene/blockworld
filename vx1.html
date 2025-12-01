@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Skyblock - Spaced Out Trees</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #87CEEB;
+            font-family: sans-serif;
+            touch-action: none;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        
+        #game-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* --- UI CONTROLS --- */
+        .ui-layer {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        /* Joystick Styles */
+        #joystick-zone {
+            position: absolute;
+            bottom: 40px;
+            left: 40px;
+            width: 120px;
+            height: 120px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            pointer-events: auto;
+            backdrop-filter: blur(2px);
+        }
+
+        #joystick-knob {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 50px;
+            height: 50px;
+            background: rgba(255, 255, 255, 0.6);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+            pointer-events: none;
+        }
+
+        /* Jump Button */
+        #btn-jump {
+            position: absolute;
+            bottom: 60px;
+            right: 40px;
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            background: rgba(255, 200, 0, 0.4);
+            border: 2px solid rgba(255, 255, 255, 0.4);
+            pointer-events: auto;
+            backdrop-filter: blur(2px);
+            transition: background 0.1s;
+        }
+        #btn-jump:active { background: rgba(255, 200, 0, 0.7); }
+
+        /* Camera Touch Zone - RIGHT HALF ONLY */
+        #touch-zone {
+            position: absolute;
+            top: 0;
+            left: 50%; 
+            width: 50%; 
+            height: 100%;
+            z-index: 5; 
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container"></div>
+    
+    <div id="touch-zone"></div>
+
+    <div class="ui-layer">
+        <div id="joystick-zone">
+            <div id="joystick-knob"></div>
+        </div>
+        <div class="control-btn" id="btn-jump"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <script>
+        // --- CONFIGURATION ---
+        const ISLAND_RADIUS = 18; // Slightly larger island to accommodate spaced trees
+        const CAMERA_FOV = 75;
+        
+        // --- PHYSICS TUNING (UNITS PER SECOND) ---
+        const PLAYER_HEIGHT = 1.8;
+        const PLAYER_RADIUS = 0.3; 
+        const WALK_SPEED = 4.5; 
+        const JUMP_VELOCITY = 9.0; 
+        const GRAVITY = 30.0;   
+
+        // --- SETUP THREE.JS ---
+        const container = document.getElementById('game-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 15, 45);
+
+        const clock = new THREE.Clock();
+
+        const camera = new THREE.PerspectiveCamera(CAMERA_FOV, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        const player = {
+            x: 0, y: 10, z: 0,
+            vx: 0, vy: 0, vz: 0,
+            yaw: 0, pitch: 0,
+            onGround: false
+        };
+
+        const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFShadowMap; 
+        container.appendChild(renderer.domElement);
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+        dirLight.position.set(25, 35, 15);
+        dirLight.castShadow = true;
+        dirLight.shadow.mapSize.width = 1024;
+        dirLight.shadow.mapSize.height = 1024;
+        dirLight.shadow.camera.left = -30;
+        dirLight.shadow.camera.right = 30;
+        dirLight.shadow.camera.top = 30;
+        dirLight.shadow.camera.bottom = -30;
+        dirLight.shadow.bias = -0.0005;
+        scene.add(dirLight);
+
+        // --- ASSETS ---
+        function createBlockTexture(colorStr) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = colorStr;
+            ctx.fillRect(0,0,64,64);
+            ctx.lineWidth = 4;
+            ctx.strokeStyle = "rgba(0,0,0,0.15)";
+            ctx.strokeRect(0,0,64,64);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        const mats = {
+            grass: new THREE.MeshLambertMaterial({ map: createBlockTexture('#56ae57') }),
+            dirt:  new THREE.MeshLambertMaterial({ map: createBlockTexture('#795548') }),
+            stone: new THREE.MeshLambertMaterial({ map: createBlockTexture('#757575') }),
+            wood:  new THREE.MeshLambertMaterial({ map: createBlockTexture('#5D4037') }),
+            leaf:  new THREE.MeshLambertMaterial({ map: createBlockTexture('#388E3C') })
+        };
+
+        // --- WORLD GEN ---
+        const MAX_INSTANCES = 5000;
+        const boxGeo = new THREE.BoxGeometry(1,1,1);
+        const meshes = {};
+        const instanceCounts = {};
+        const worldData = new Set();
+
+        Object.keys(mats).forEach(key => {
+            const mesh = new THREE.InstancedMesh(boxGeo, mats[key], MAX_INSTANCES);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+            meshes[key] = mesh;
+            instanceCounts[key] = 0;
+        });
+
+        const dummy = new THREE.Object3D(); 
+
+        function addBlock(x, y, z, type) {
+            if (instanceCounts[type] >= MAX_INSTANCES) return;
+            worldData.add(`${x},${y},${z}`);
+            dummy.position.set(x, y, z);
+            dummy.updateMatrix();
+            meshes[type].setMatrixAt(instanceCounts[type], dummy.matrix);
+            instanceCounts[type]++;
+        }
+
+        function generateTree(x, y, z) {
+            const height = Math.floor(Math.random() * 2) + 3;
+            for(let i=0; i<height; i++) addBlock(x, y + i, z, 'wood');
+            const leafStart = y + height - 2;
+            for(let lx = -2; lx <= 2; lx++){
+                for(let lz = -2; lz <= 2; lz++){
+                    for(let ly = leafStart; ly <= leafStart + 1; ly++){
+                        if (Math.abs(lx) === 2 && Math.abs(lz) === 2 && Math.random() > 0.5) continue;
+                        if (lx === 0 && lz === 0) continue;
+                        addBlock(x + lx, ly, z + lz, 'leaf');
+                    }
+                }
+            }
+            addBlock(x, leafStart + 2, z, 'leaf');
+            addBlock(x, leafStart + 2, z+1, 'leaf');
+            addBlock(x, leafStart + 2, z-1, 'leaf');
+            addBlock(x+1, leafStart + 2, z, 'leaf');
+            addBlock(x-1, leafStart + 2, z, 'leaf');
+            addBlock(x, leafStart + 3, z, 'leaf');
+        }
+
+        function generateWorld() {
+            const treePositions = [];
+            let startHeight = 0;
+
+            for (let x = -ISLAND_RADIUS; x <= ISLAND_RADIUS; x++) {
+                for (let z = -ISLAND_RADIUS; z <= ISLAND_RADIUS; z++) {
+                    const dist = Math.sqrt(x*x + z*z);
+                    if (dist > ISLAND_RADIUS) continue;
+                    
+                    let height = Math.sin(x * 0.25) * 2 + Math.cos(z * 0.25) * 2;
+                    height += Math.sin(x * 0.1 + z * 0.1) * 1;
+                    height = Math.floor(height);
+                    if (x === 0 && z === 0) startHeight = height;
+
+                    addBlock(x, height, z, 'grass');
+                    addBlock(x, height - 1, z, 'dirt');
+                    addBlock(x, height - 2, z, 'dirt');
+                    if (Math.random() > 0.3 || dist < ISLAND_RADIUS/2) addBlock(x, height-3, z, 'stone');
+
+                    if (Math.abs(x) > 3 || Math.abs(z) > 3) {
+                        if (Math.random() < 0.1) { 
+                            let tooClose = false;
+                            for (let t of treePositions) {
+                                // INCREASED DISTANCE: Changed from 5 to 9
+                                if (Math.sqrt((x-t.x)**2 + (z-t.z)**2) < 9) { tooClose = true; break; }
+                            }
+                            if (!tooClose) {
+                                generateTree(x, height + 1, z);
+                                treePositions.push({x: x, z: z});
+                            }
+                        }
+                    }
+                }
+            }
+            Object.keys(meshes).forEach(key => {
+                meshes[key].count = instanceCounts[key];
+                meshes[key].instanceMatrix.needsUpdate = true;
+            });
+            player.y = startHeight + 2;
+        }
+        generateWorld();
+
+        // --- CONTROLS ---
+        const joystick = { x: 0, y: 0, active: false };
+        const joyZone = document.getElementById('joystick-zone');
+        const joyKnob = document.getElementById('joystick-knob');
+        const joyRadius = 60; 
+        let joyTouchId = null;
+
+        joyZone.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const touch = e.changedTouches[0];
+            joyTouchId = touch.identifier;
+            joystick.active = true;
+            updateJoystick(touch);
+        }, { passive: false });
+
+        joyZone.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (!joystick.active) return;
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                if (e.changedTouches[i].identifier === joyTouchId) {
+                    updateJoystick(e.changedTouches[i]);
+                    break;
+                }
+            }
+        }, { passive: false });
+
+        function resetJoystick() {
+            joystick.active = false;
+            joystick.x = 0; joystick.y = 0;
+            joyKnob.style.transform = `translate(-50%, -50%)`;
+            joyTouchId = null;
+        }
+        joyZone.addEventListener('touchend', resetJoystick);
+        joyZone.addEventListener('touchcancel', resetJoystick);
+
+        function updateJoystick(touch) {
+            const rect = joyZone.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            let dx = touch.clientX - cx;
+            let dy = touch.clientY - cy;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            const maxDist = joyRadius - 25;
+            if (dist > maxDist) { dx = (dx/dist)*maxDist; dy = (dy/dist)*maxDist; }
+            joyKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+            joystick.x = dx / maxDist; 
+            joystick.y = -(dy / maxDist); 
+        }
+
+        // Camera & Jump
+        let jumpPressed = false;
+        const jumpBtn = document.getElementById('btn-jump');
+        jumpBtn.addEventListener('touchstart', (e) => { e.preventDefault(); jumpPressed = true; });
+        jumpBtn.addEventListener('touchend', (e) => { e.preventDefault(); jumpPressed = false; });
+
+        let lastLookX = 0, lastLookY = 0;
+        const touchZone = document.getElementById('touch-zone');
+        let camTouchId = null;
+
+        touchZone.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (camTouchId === null) {
+                const t = e.changedTouches[0];
+                camTouchId = t.identifier;
+                lastLookX = t.clientX; lastLookY = t.clientY;
+            }
+        }, { passive: false });
+
+        touchZone.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                if (e.changedTouches[i].identifier === camTouchId) {
+                    const t = e.changedTouches[i];
+                    const dx = t.clientX - lastLookX;
+                    const dy = t.clientY - lastLookY;
+                    player.yaw -= dx * 0.005;
+                    player.pitch -= dy * 0.005;
+                    player.pitch = Math.max(-Math.PI/2 + 0.1, Math.min(Math.PI/2 - 0.1, player.pitch));
+                    lastLookX = t.clientX; lastLookY = t.clientY;
+                    break;
+                }
+            }
+        }, { passive: false });
+
+        const endCamera = (e) => {
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                if (e.changedTouches[i].identifier === camTouchId) { camTouchId = null; break; }
+            }
+        };
+        touchZone.addEventListener('touchend', endCamera);
+        touchZone.addEventListener('touchcancel', endCamera);
+
+        // --- DELTA TIME PHYSICS ---
+        function checkCollision(px, py, pz) {
+            const minX = Math.floor(px - PLAYER_RADIUS);
+            const maxX = Math.floor(px + PLAYER_RADIUS);
+            const minZ = Math.floor(pz - PLAYER_RADIUS);
+            const maxZ = Math.floor(pz + PLAYER_RADIUS);
+            const minY = Math.floor(py);
+            const maxY = Math.floor(py + PLAYER_HEIGHT - 0.1);
+
+            for (let x = minX; x <= maxX; x++) {
+                for (let z = minZ; z <= maxZ; z++) {
+                    for (let y = minY; y <= maxY; y++) {
+                        if (worldData.has(`${x},${y},${z}`)) return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function updatePhysics(dt) {
+            if (dt > 0.1) dt = 0.1;
+
+            let moveX = 0;
+            let moveZ = 0;
+
+            if (joystick.active || joystick.x !== 0 || joystick.y !== 0) {
+                moveX += -Math.sin(player.yaw) * joystick.y;
+                moveZ += -Math.cos(player.yaw) * joystick.y;
+                moveX += Math.cos(player.yaw) * joystick.x;
+                moveZ += -Math.sin(player.yaw) * joystick.x;
+            }
+            
+            const len = Math.sqrt(moveX*moveX + moveZ*moveZ);
+            if (len > 1) { moveX /= len; moveZ /= len; }
+            
+            const moveDist = WALK_SPEED * dt;
+            moveX *= moveDist;
+            moveZ *= moveDist;
+
+            if (!checkCollision(player.x + moveX, player.y, player.z)) {
+                player.x += moveX;
+            }
+            if (!checkCollision(player.x, player.y, player.z + moveZ)) {
+                player.z += moveZ;
+            }
+
+            player.vy -= GRAVITY * dt;
+            if (jumpPressed && player.onGround) {
+                player.vy = JUMP_VELOCITY;
+                player.onGround = false;
+            }
+
+            const moveY = player.vy * dt;
+            const nextY = player.y + moveY;
+
+            if (player.vy < 0) { 
+                if (checkCollision(player.x, nextY, player.z)) {
+                    player.y = Math.ceil(nextY);
+                    player.vy = 0;
+                    player.onGround = true;
+                } else {
+                    player.y = nextY;
+                    player.onGround = false;
+                }
+            } else if (player.vy > 0) {
+                if (checkCollision(player.x, nextY, player.z)) {
+                    player.vy = 0; 
+                } else {
+                    player.y = nextY;
+                    player.onGround = false;
+                }
+            }
+
+            if (player.y < -20) {
+                player.x = 0; player.z = 0; player.y = 25; player.vy = 0;
+            }
+        }
+
+        function updateCamera() {
+            camera.position.set(player.x, player.y + 1.6, player.z);
+            camera.rotation.set(player.pitch, player.yaw, 0, 'YXZ');
+        }
+
+        function update() {
+            const dt = clock.getDelta();
+            updatePhysics(dt);
+            updateCamera();
+            renderer.render(scene, camera);
+            requestAnimationFrame(update);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        update();
+    </script>
+</body>
+</html> player.y + 1.6, player.z);
+            camera.rotation.set(player.pitch, player.yaw, 0, 'YXZ');
+        }
+
+        function update() {
+            // Get time passed since last frame (seconds)
+            const dt = clock.getDelta();
+            
+            updatePhysics(dt);
+            updateCamera();
+            renderer.render(scene, camera);
+            requestAnimationFrame(update);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        update();
+    </script>
+</body>
+</html> 
+        joystickZone.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            for (let touch of e.changedTouches) {
+                if (touch.identifier === joystickTouch) {
+                    updateJoystick(touch);
+                }
+            }
+        });
+        
+        joystickZone.addEventListener('touchend', (e) => {
+            for (let touch of e.changedTouches) {
+                if (touch.identifier === joystickTouch) {
+                    joystickTouch = null;
+                    joystickInput.x = 0;
+                    joystickInput.y = 0;
+                    joystickStick.style.transform = 'translate(-50%, -50%)';
+                }
+            }
+        });
+        
+        joystickZone.addEventListener('touchcancel', (e) => {
+            joystickTouch = null;
+            joystickInput.x = 0;
+            joystickInput.y = 0;
+            joystickStick.style.transform = 'translate(-50%, -50%)';
+        });
+        
+        function updateJoystick(touch) {
+            const rect = joystickZone.getBoundingClientRect();
+            const centerX = rect.left + rect.width / 2;
+            const centerY = rect.top + rect.height / 2;
+            
+            let dx = touch.clientX - centerX;
+            let dy = touch.clientY - centerY;
+            
+            const maxDist = 40;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            if (dist > maxDist) {
+                dx = (dx / dist) * maxDist;
+                dy = (dy / dist) * maxDist;
+            }
+            
+            joystickInput.x = dx / maxDist;
+            joystickInput.y = -dy / maxDist;
+            
+            joystickStick.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+        }
+        
+        // Jump button
+        jumpBtn.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            jumpPressed = true;
+        });
+        
+        // Look controls
+        lookZone.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            if (lookTouch === null) {
+                lookTouch = e.changedTouches[0].identifier;
+                lastLookPos.x = e.changedTouches[0].clientX;
+                lastLookPos.y = e.changedTouches[0].clientY;
+            }
+            // Hide instructions on first touch
+            instructions.style.opacity = '0';
+        });
+        
+        lookZone.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            for (let touch of e.changedTouches) {
+                if (touch.identifier === lookTouch) {
+                    const dx = touch.clientX - lastLookPos.x;
+                    const dy = touch.clientY - lastLookPos.y;
+                    
+                    yaw -= dx * LOOK_SENSITIVITY * 0.01;
+                    pitch -= dy * LOOK_SENSITIVITY * 0.01;
+                    
+                    // Clamp pitch
+                    pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, pitch));
+                    
+                    lastLookPos.x = touch.clientX;
+                    lastLookPos.y = touch.clientY;
+                }
+            }
+        });
+        
+        lookZone.addEventListener('touchend', (e) => {
+            for (let touch of e.changedTouches) {
+                if (touch.identifier === lookTouch) {
+                    lookTouch = null;
+                }
+            }
+        });
+        
+        lookZone.addEventListener('touchcancel', (e) => {
+            lookTouch = null;
+        });
+
+        // --- KEYBOARD CONTROLS (for testing on desktop) ---
+        const keys = {};
+        
+        document.addEventListener('keydown', (e) => {
+            keys[e.code] = true;
+            if (e.code === 'Space') {
+                jumpPressed = true;
+            }
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            keys[e.code] = false;
+        });
+        
+        function updateKeyboardInput() {
+            if (keys['KeyW'] || keys['ArrowUp']) joystickInput.y = 1;
+            else if (keys['KeyS'] || keys['ArrowDown']) joystickInput.y = -1;
+            else if (joystickTouch === null) joystickInput.y = 0;
+            
+            if (keys['KeyD'] || keys['ArrowRight']) joystickInput.x = 1;
+            else if (keys['KeyA'] || keys['ArrowLeft']) joystickInput.x = -1;
+            else if (joystickTouch === null) joystickInput.x = 0;
+        }
+        
+        // Mouse look (for desktop testing)
+        let mouseDown = false;
+        
+        renderer.domElement.addEventListener('mousedown', (e) => {
+            mouseDown = true;
+            instructions.style.opacity = '0';
+        });
+        
+        renderer.domElement.addEventListener('mouseup', () => {
+            mouseDown = false;
+        });
+        
+        renderer.domElement.addEventListener('mousemove', (e) => {
+            if (mouseDown) {
+                yaw -= e.movementX * 0.003;
+                pitch -= e.movementY * 0.003;
+                pitch = Math.max(-Math.PI / 2 + 0.1, Math.min(Math.PI / 2 - 0.1, pitch));
+            }
+        });
+
+        // --- RENDER LOOP ---
+        let lastTime = performance.now();
+        
+        function update() {
+            const now = performance.now();
+            const deltaTime = (now - lastTime) / 1000;
+            lastTime = now;
+            
+            updateKeyboardInput();
+            updatePlayer(deltaTime);
+            
+            renderer.render(scene, camera);
+            requestAnimationFrame(update);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Prevent default touch behavior
+        document.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+        }, { passive: false });
+
+        update();
+    </script>
+</body>
+</html>
